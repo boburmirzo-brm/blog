@@ -1,0 +1,59 @@
+name: Deploy Backend Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npx eslint "{src,test}/**/*.ts"
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd /opt/blog
+            git pull origin main
+            docker compose up -d --build --wait --wait-timeout 120
+            docker image prune -f
+
+            # Health check: fail the deploy if the API doesn't answer
+            PORT=$(grep -E '^API_PORT=' .env 2>/dev/null | cut -d= -f2)
+            PORT=${PORT:-3006}
+            for i in $(seq 1 20); do
+              if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/docs"; then
+                echo "API is up"
+                exit 0
+              fi
+              sleep 3
+            done
+            echo "API did not respond"
+            docker compose logs --tail 50 api
+            exit 1
